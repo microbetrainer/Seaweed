@@ -1,0 +1,350 @@
+---
+title: "Seaweed Data Analysis"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+## Loading Data
+Load dada2 for uploading sequence table; load metadata file
+```{r}
+library(dada2); packageVersion("dada2") # load dada2 
+path <- "/Users/skearney/Documents/Alm Lab/Niche Engineering/DADA2" # change this to location of DADA2 files
+
+seqtab <- readRDS(paste(c(path,"/seqtab_final.rds"),collapse="")) # sequence table
+meta <- read.csv(paste(c(path,"/meta.csv"),collapse="")) # metadata file
+taxa <- readRDS(paste(c(path,"/tax_RDP.rds"),collapse=""))
+qpcr <- read.csv(paste(c(path,"/qpcr_Bplebeius.csv"),collapse=""))
+```
+# negatives removal
+```{r}
+neg.s <- as.character(subset(meta,Treatment=="neg")$SampleID)
+NEG <- match(neg.s,rownames(seqtab)) # find negative samples
+NEG.rel <- apply(seqtab[NEG,],1,function(x) x/sum(x)) # 
+NEG.sum <- colSums(NEG.rel) # combine negatives into a single vector 
+NEG.med <- apply(NEG.rel,1,median)
+NEG.nor <- NEG.med/sum(NEG.med) # normalize negatives vector
+NEG.rm <- which(NEG.sum > 0) # identify seqs that are present in negatives
+NEG.rf <- which(NEG.nor > 0.1) # remove sequences that are present at more than 10%
+seqtab.prune <- seqtab[-NEG,-NEG.rf] # remove negatives and seqs in the negatives
+tax.prune <- taxa[-NEG.rf,] # remove negative sample taxa from taxa
+seqtab.jitter <- seqtab.prune + runif(length(seqtab.prune),0,1e-9)
+```
+## PhyloSeq Analysis
+Load packages
+```{r}
+library(phyloseq); packageVersion("phyloseq")
+```
+```{r}
+library(ggplot2); packageVersion("ggplot2")
+```
+```{r}
+library(plyr); packageVersion("plyr")
+```
+
+```{r}
+library(DESeq2); packageVersion("DESeq2")
+```
+
+```{r}
+library(indicspecies); packageVersion("indicspecies")
+```
+```{r}
+library(patchwork); packageVersion("patchwork")
+```
+make sampling scheme diagrams - figure 1 a and 2 a
+```{r}
+dates1 <- seq(as.Date("2015/11/27"),as.Date("2016/1/22"),by="day")
+dates2 <- seq(as.Date("2014/11/16"),as.Date("2015/2/26"),by="day")
+
+sample1C <- c(rep(0,57))
+sample1S <- c(rep(1,17),rep(0,32),rep(1,8))
+sdates1 <- c(as.Date("2015/11/27"),as.Date("2015/12/01"),as.Date("2015/12/13"),as.Date("2016/1/14"),as.Date("2016/1/18"))
+
+dates1x <- dates1 - dates1[1]
+smpl1df <- data.frame(dates1,dates1x,sample1C,sample1S)
+
+sdates1x <- sdates1 - dates1[1]
+
+pd1C <- ggplot(smpl1df,aes(x=dates1x,y=sample1C))  + geom_line(color="green") +  geom_area(fill="green",alpha=0.5) + geom_vline(xintercept = sdates1x) + ylim(0,1)
+pd1S <- ggplot(smpl1df,aes(x=dates1x,y=sample1S))  + geom_line(color="green") +  geom_area(fill="green",alpha=0.5) + geom_vline(xintercept = sdates1x) + ylim(0,1)
+
+sample2S <- c(rep(1,36),rep(0,59),rep(1,8))
+sample2N <- c(rep(0,103))
+sample2C <- c(rep(1,36),rep(0,59),rep(1,8))
+sample2O <- c(rep(1,4),rep(0,4),rep(1,4),rep(0,4),rep(1,4),rep(0,4),rep(1,4),rep(0,4),rep(1,4),rep(0,59),rep(1,8))
+
+
+dates2x <- dates2 - dates2[1]
+smpl2df <- data.frame(dates2,dates2x,sample2N,sample2C,sample2O,sample2S)
+
+sdates2 <- c(as.Date("2014/11/16"),as.Date("2014/12/06"),as.Date("2014/12/18"),as.Date("2015/2/23"))
+sdates2x <- sdates2 - dates2[1]
+
+pd2S <- ggplot(smpl2df,aes(x=dates2x,y=sample2S))  + geom_line(color="green") +  geom_area(fill="green",alpha=0.5) + ylim(0,1) + geom_vline(xintercept = sdates2x[2:4])
+pd2N <- ggplot(smpl2df,aes(x=dates2x,y=sample2N))  + geom_line(color="green") +  geom_area(fill="green",alpha=0.5) + ylim(0,1) + geom_vline(xintercept = sdates2x)
+pd2C <- ggplot(smpl2df,aes(x=dates2x,y=sample2C))  + geom_line(color="green") +  geom_area(fill="green",alpha=0.5) + ylim(0,1) + geom_vline(xintercept = sdates2x)
+pd2O <- ggplot(smpl2df,aes(x=dates2x,y=sample2O))  + geom_line(color="green") +  geom_area(fill="green",alpha=0.5) + ylim(0,1) + geom_vline(xintercept = sdates2x)
+
+pd2S / pd2N / pd2C / pd2O
+
+```
+
+Analysis of seaweed control experiment
+```{r}
+smp.con <- subset(meta,Treatment=="NC" | Treatment=="NN" ) # subset meta data to just seaweed control
+seq.con <- seqtab.prune[sapply(smp.con$SampleID,as.character),] # subset sequence table to seaweed control expt
+meta.con <- data.frame(smp.con)
+rownames(meta.con) <- meta.con$SampleID
+seq.con.n <- t(apply(seq.con,1,function(x) x/sum(x) + 1e-6))
+ps.con <- phyloseq(otu_table(seq.con,taxa_are_rows=F),sample_data(meta.con),tax_table(tax.prune)) # construct phyloseq object for seaweed control experiment
+wh0 <- genefilter_sample(ps.con,filterfun_sample(function(x) x > 4),A=0.5*nsamples(ps.con)) # remove OTUs that do not appear more than 4 times in more than half the samples
+ps.con1 <- prune_taxa(wh0,ps.con)
+ps.con1 <- transform_sample_counts(ps.con1,function(x) x/sum(x)) # normalize sample depth
+```
+
+
+```{r}
+set.seed(100)
+ord.nmds.jsd <- ordinate(ps.con1,method="NMDS",distance="jsd") # use Jensen-Shannon distance with NMDS to ordinate
+```
+
+```{r}
+ordp1 <- plot_ordination(ps.con1,ord.nmds.jsd,color="mdata2",title="JSD NMDS") # make ordination plot
+```
+Look for subtle differences using /indicator species/
+```{r}
+# identify pre-seaweed & post-seaweed time points 
+pre1 <- "11/27/15"
+pre2 <- "1/14/16"
+pst1 <- "12/1/15"
+pst15 <- "12/13/15"
+pst2 <- "1/18/16"
+
+pre.swd <- subset(meta.con,(Fdate==pre1 | Fdate==pre2) & Treatment=="NC") # pre-seaweed mice
+pst.swd <- subset(meta.con,(Fdate==pst1 | Fdate==pst2) & Treatment=="NC") # post-seaweed mice
+
+pre.swdID <- sapply(pre.swd$SampleID,as.character)
+pst.swdID <- sapply(pst.swd$SampleID,as.character)
+
+ps.shannon <- estimate_richness(ps.con1,measures="Shannon")
+date.tmp <- smp.con$Fdate
+smp.con$Fdate <- as.Date(date.tmp,"%m/%d/%y")
+smp.con$Shannon <- ps.shannon$Shannon
+colnames(seq.con) <- seq(1,length(colnames(seq.con)))
+smp.con$Mdate <- smp.con$Fdate - dates1[1]
+
+pd.S1 <- ggplot(subset(smp.con,Treatment=="NN"),aes(x=Mdate,y=Shannon,group=Subject))  + geom_line() + theme(legend.position = "none")
+pd.S2 <- ggplot(subset(smp.con,Treatment=="NC"),aes(x=Mdate,y=Shannon,group=Subject))  + geom_line() + theme(legend.position = "none")
+
+(pd.S1 / pd.S2) | ordp1
+
+
+# plot alpha diversity and B-diversity over time for each of 10 mice
+
+
+```
+Analysis of Initial B. plebeius Time Series Data
+```{r}
+smp.bp <- subset(meta,mdata2=="ts") # subset meta data to b plebieus time series
+seq.bp <- seqtab.prune[sapply(smp.bp$SampleID,as.character),] # subset sequence table to b plebeius time series
+meta.bp <- data.frame(smp.bp)
+rownames(meta.bp) <- meta.bp$SampleID
+```
+obtain time series renderings of B. plebeius in each animal
+```{r}
+# B plebeius is sequence variant # 2
+# Gavage + Constant Animals (c = constant) - 10277 (GC1), 10288 (GC2), 10291
+# Gavage + Oscillated Animals (o = oscillated) - 10283 (GO1), 10287 (GO2), 10280
+# Gavage Only Animals: (g = gavage, n = no treatment) - 10284 (GN1), 10299 (GN2), 10279
+seq.bp.t <- t(apply(seq.bp,1,function(x) x/sum(x)))
+gn.swd <- subset(smp.bp,Treatment=="GN") # pre-seaweed mice
+gc.swd <- subset(smp.bp,Treatment=="GC") # post-seaweed mice
+gp.swd <- subset(smp.bp,Treatment=="GO") # post-seaweed mice
+
+gn.id <- sapply(gn.swd$SampleID,as.character)
+gc.id <- sapply(gc.swd$SampleID,as.character)
+gp.id <- sapply(gp.swd$SampleID,as.character)
+
+akk.prop <- seq.bp.t[,1]/seq.bp.t[,2]
+
+ts.df <- data.frame(cbind(as.Date(smp.bp$Fdate,"%m/%d/%y"),smp.bp$Subject,smp.bp$Treatment,seq.bp.t[,2],smp.bp$Treatment,seq.bp.t[,1]))
+ts.df$X1 <- as.Date(smp.bp$Fdate,"%m/%d/%y") - dates2[1]
+ts.df$X2 <- smp.bp$Subject
+ts.df$X3 <- smp.bp$Treatment
+
+ts.p1 <- ggplot(subset(ts.df,X2=="10284"|X2=="10299"),aes(x=X1,y=X4)) + geom_line(aes(color=X2),size=2) + scale_color_brewer(palette="Greens")  + scale_y_log10(limits=c(1e-6,1)) + geom_hline(yintercept=median(subset(ts.df,X2=="10284"|X2=="10299")[,4]),color="gray",linetype=2)+theme_gray()+ theme(legend.position="none")
+
+ts.p3 <- ggplot(subset(ts.df,X2=="10283"|X2=="10287"),aes(x=X1,y=X4)) + geom_line(aes(color=X2),size=2) + scale_color_brewer(palette="Blues")  + scale_y_log10(limits=c(1e-6,1)) + geom_hline(yintercept=median(subset(ts.df,X2=="10283"|X2=="10287")[,4]),color="gray",linetype=2)+theme_gray()+ theme(legend.position="none")
+
+ts.p2 <- ggplot(subset(ts.df,X2=="10277"|X2=="10288"),aes(x=X1,y=X4)) + geom_line(aes(color=X2),size=2) + scale_color_brewer(palette="Purples")  + scale_y_log10(limits=c(1e-6,1)) + geom_hline(yintercept=median(subset(ts.df,X2=="10277"|X2=="10288")[,4]),color="gray",linetype=2)+theme_gray()+ theme(legend.position="none")
+
+
+ts.p1 + ts.p2 + ts.p3
+
+# addition of qPCR data from 3 additional mice per group
+qpcr.df <- qpcr
+rownames(qpcr.df) <- qpcr.df[,1]
+qpcr.df <- data.frame(qpcr.df)
+qpcr.df$DATE <- as.Date(qpcr.df$DATE,"%m/%d/%y")
+
+qp1 <- ggplot(subset(qpcr.df,DATE==as.Date("2014-12-06")),aes(x=GROUP,y=RA,color=GROUP)) + geom_jitter() + scale_y_log10(limits=c(1e-6,1)) + theme(legend.position="none")
+qp2 <- ggplot(subset(qpcr.df,DATE==as.Date("2014-12-18")),aes(x=GROUP,y=RA,color=GROUP)) + geom_jitter() + scale_y_log10(limits=c(1e-6,1)) + theme(legend.position="none")
+qp3 <- ggplot(subset(qpcr.df,DATE==as.Date("2015-02-23")),aes(x=GROUP,y=RA,color=GROUP)) + geom_jitter() + scale_y_log10(limits=c(1e-6,1)) + theme(legend.position="none")
+
+# count number of negative correlations between B. plebeius and other OTUs
+mouseIDs <- c("10284","10299","10283","10287","10277","10288")
+cmat <- matrix(NA,nrow=6,ncol=dim(seq.bp.t)[2])
+pmat <- matrix(NA,nrow=6,ncol=dim(seq.bp.t)[2])
+ctre <- matrix(NA,nrow=6,ncol=dim(seq.bp.t)[2])
+ptre <- matrix(NA,nrow=6,ncol=dim(seq.bp.t)[2])
+nmap <- c()
+pmap <- c()
+hmap <- c()
+lmap <- c()
+for (i in 1:6){
+  for (j in 1:dim(seq.bp.t)[2]){
+    ind <- rownames(subset(ts.df,X2==mouseIDs[i]))
+    ctmp <- cor.test(seq.bp.t[ind,2],seq.bp.t[ind,j],method="spearman",use="complete.obs") 
+    ttmp <- summary(lm(log(seq.bp.t[ind,j]+1e-6)~ts.df[ind,]$X1))$coefficients
+    cmat[i,j] <- ctmp$estimate
+    pmat[i,j] <- ctmp$p.value
+    ctre[i,j] <- ttmp[2]
+    ptre[i,j] <- ttmp[8]
+  }
+  lmap[i] <- length(which(cmat[i,] < 0 & pmat[i,] < 0.01))
+  hmap[i] <- length(which(cmat[i,] > 0 & pmat[i,] < 0.01))
+  nmap[i] <- length(which(ctre[i,] < 0 & ptre[i,] < 0.01))
+  pmap[i] <- length(which(ctre[i,] > 0 & ptre[i,] < 0.01))
+}
+
+```
+
+Analysis of Follow Up Time Series Data
+```{r}
+smp.lts <- subset(meta,mdata2=="tsl") # subset meta data to b plebieus time series
+seq.lts <- seqtab.prune[sapply(smp.lts$SampleID,as.character),] # subset sequence table to b plebeius time series
+meta.lts <- data.frame(smp.lts)
+rownames(meta.lts) <- meta.lts$SampleID
+
+seq.bp.lt <- t(apply(seq.lts,1,function(x) x/sum(x)))
+
+lts.df <- data.frame(cbind(as.Date(smp.lts$Fdate,"%m/%d/%y"),smp.lts$Subject,smp.lts$Treatment,seq.bp.lt[,2]))
+lts.df$X1 <- as.Date(smp.lts$Fdate,"%m/%d/%y") - dates2[1]
+lts.df$X2 <- smp.lts$Subject
+lts.df$X3 <- smp.lts$Treatment
+
+lt.p1 <- ggplot(subset(lts.df,X2=="10284"|X2=="10299"|X2=="10291"),aes(x=X1,y=X4)) + geom_line(aes(color=X2),size=2) + scale_color_brewer(palette="Greens") + scale_y_log10(limits=c(1e-6,1)) + theme_gray() + theme(legend.position="none")
+
+lt.p3 <- ggplot(subset(lts.df,X2=="10283"|X2=="10287"|X2=="10280"),aes(x=X1,y=X4)) + geom_line(aes(color=X2),size=2) + scale_color_brewer(palette="Blues")  + scale_y_log10(limits=c(1e-6,1)) + theme_gray() + theme(legend.position="none")
+
+lt.p2 <- ggplot(subset(lts.df,X2=="10277"|X2=="10288"|X2=="10279"),aes(x=X1,y=X4)) +  geom_line(aes(color=X2),size=2) + scale_color_brewer(palette="Purples") + scale_y_log10(limits=c(1e-6,1)) + theme_gray() + theme(legend.position="none")
+
+qp3 | lt.p1 | lt.p2 | lt.p3
+
+```
+
+Analysis of IgA-Seq Data from 02.23.2015
+```{r}
+smp.iga <- subset(meta,Fdate=="2/23/15") # subset meta data to b plebieus time series
+seq.iga <- seqtab.prune[sapply(smp.iga$SampleID,as.character),] # subset sequence table to b plebeius time series
+meta.iga <- data.frame(smp.iga)
+rownames(meta.iga) <- meta.iga$SampleID
+
+
+
+# identify position of B. plebeius in IgA-Hi/IgA-Low for each animal
+seq.bp.iga <- t(apply(seq.iga,1,function(x) x/sum(x) + 1e-6))
+seq.iga.df <- as.data.frame(t(seq.bp.iga))
+rownames(seq.iga.df) <- seq(1,length(colnames(seq.con))) 
+
+
+# collect subjects 
+iga.subs <- unique(meta.iga$Subject)
+iga.seq.df <- matrix(NA,nrow=2*length(iga.subs),ncol=dim(seq.bp.iga)[2])
+k <- 1
+name.vec <- c()
+for (i in iga.subs){
+  tmp.hi <- rownames(subset(meta.iga,Subject==i & mdata2 =="iga_hi"))
+  tmp.lo <- rownames(subset(meta.iga,Subject==i & mdata2 =="iga_lo"))
+  iga.hi <- apply(seq.iga.df[,tmp.hi],1,median)
+  iga.lo <- apply(seq.iga.df[,tmp.lo],1,median)
+  iga.seq.df[k,] <- iga.hi
+  name.vec[k] <- paste(c("IgAp",i),collapse="")
+  k <- k + 1
+  iga.seq.df[k,] <- iga.lo
+  name.vec[k] <- paste(c("IgAm",i),collapse="")
+  k <- k + 1
+}
+rownames(iga.seq.df) <- name.vec
+iga.seq.data <- as.data.frame(t(iga.seq.df))
+
+# PORT IN DESEQ to do differential expression analysis between conditions
+iga.hi.smp <- rownames(subset(meta.iga,mdata2 == "iga_hi"))
+iga.lo.smp <- rownames(subset(meta.iga,mdata2 == "iga_lo"))
+DEtaxa <- apply(unname(tax.prune),1,function(x) paste(x,collapse=";"))
+# in otu table, columns are samples
+DEWrapper  <- function(otus,taxa,treated,untreated){
+  require(DESeq2)
+  countdata <- cbind(otus[,treated],otus[,untreated])
+  coldata <- cbind(c(rep("treated",length(treated)),c(rep("untreated",length(treated)))),rep("paired-end",length(c(treated,untreated))))
+  rownames(coldata) <- colnames(countdata)
+  colnames(coldata) <- c("condition","type")
+  rownames(countdata) <- taxa
+  dds <- DESeqDataSetFromMatrix(countData=countdata,colData=coldata,design=~condition)
+  dds <- DESeq(dds,test="Wald",fitType="parametric")
+  res <- results(dds)
+  return(res)
+}
+
+
+pmat <- matrix(NA,nrow=6,ncol=dim(seq.iga)[2])
+lfcm <- matrix(NA,nrow=6,ncol=dim(seq.iga)[2])
+ind.hi <- list()
+ind.lo <- list()
+j <- 1
+for (i in 1:6){
+  tmp <- DEWrapper(t(seq.iga),DEtaxa,iga.hi.smp[j:(j+2)],iga.lo.smp[j:(j+2)])
+  lfcm[i,] <- tmp$log2FoldChange
+  pmat[i,] <- tmp$padj
+  ind.hi[[i]] <- which(lfcm[i,] < 0 & pmat[i,] < 0.05)
+  ind.lo[[i]] <- which(lfcm[i,] > 0 & pmat[i,] < 0.05)
+  j <- j + 3
+}
+rownames(pmat) <- as.character(iga.subs)
+rownames(lfcm) <- as.character(iga.subs)
+
+# plotting commands to make iga data plots
+IgA279HI <- iga.seq.data[ind.hi[[1]],]; IgA279LO <- iga.seq.data[ind.lo[[1]],]
+IgA280HI <- iga.seq.data[ind.hi[[2]],]; IgA280LO <- iga.seq.data[ind.lo[[2]],]
+IgA283HI <- iga.seq.data[ind.hi[[3]],]; IgA283LO <- iga.seq.data[ind.lo[[3]],]
+IgA284HI <- iga.seq.data[ind.hi[[4]],]; IgA284LO <- iga.seq.data[ind.lo[[4]],]
+IgA287HI <- iga.seq.data[ind.hi[[5]],]; IgA287LO <- iga.seq.data[ind.lo[[5]],]
+IgA299HI <- iga.seq.data[ind.hi[[6]],]; IgA299LO <- iga.seq.data[ind.lo[[6]],]
+IgABP <- iga.seq.data[2,]
+
+
+p1 <- ggplot(iga.seq.data,aes(x=IgAm10283,y=IgAp10283)) + geom_point(color="gray") + scale_x_log10(limits=c(1e-6,1)) + scale_y_log10(limits=c(1e-6,1)) +  geom_point(data=IgA283HI,aes(x=IgAm10283,y=IgAp10283),color="red") + geom_point(data=IgA283LO,aes(x=IgAm10283,y=IgAp10283),color="blue") +   geom_point(data=IgABP,aes(x=IgAm10283,y=IgAp10283),color="orange",size=2) + theme_gray() 
+
+p2 <- ggplot(iga.seq.data,aes(x=IgAm10287,y=IgAp10287)) + geom_point(color="gray") + scale_x_log10(limits=c(1e-6,1)) + scale_y_log10(limits=c(1e-6,1)) +  geom_point(data=IgA287HI,aes(x=IgAm10287,y=IgAp10287),color="red") + geom_point(data=IgA287LO,aes(x=IgAm10287,y=IgAp10287),color="blue") +   geom_point(data=IgABP,aes(x=IgAm10287,y=IgAp10287),color="orange",size=2) + theme_gray()
+
+p3 <- ggplot(iga.seq.data,aes(x=IgAm10280,y=IgAp10280)) + geom_point(color="gray") + scale_x_log10(limits=c(1e-6,1)) + scale_y_log10(limits=c(1e-6,1)) +  geom_point(data=IgA280HI,aes(x=IgAm10280,y=IgAp10280),color="red") + geom_point(data=IgA280LO,aes(x=IgAm10280,y=IgAp10280),color="blue") +   geom_point(data=IgABP,aes(x=IgAm10280,y=IgAp10280),color="orange",size=2) + theme_gray()
+
+p4 <- ggplot(iga.seq.data,aes(x=IgAm10284,y=IgAp10284)) + geom_point(color="gray") + scale_x_log10(limits=c(1e-6,1)) + scale_y_log10(limits=c(1e-6,1)) +  geom_point(data=IgA284HI,aes(x=IgAm10284,y=IgAp10284),color="red") + geom_point(data=IgA284LO,aes(x=IgAm10284,y=IgAp10284),color="blue") +   geom_point(data=IgABP,aes(x=IgAm10284,y=IgAp10284),color="orange",size=2) + theme_gray() 
+
+p5 <- ggplot(iga.seq.data,aes(x=IgAm10299,y=IgAp10299)) + geom_point(color="gray") + scale_x_log10(limits=c(1e-6,1)) + scale_y_log10(limits=c(1e-6,1)) +  geom_point(data=IgA299HI,aes(x=IgAm10299,y=IgAp10299),color="red") + geom_point(data=IgA299LO,aes(x=IgAm10299,y=IgAp10299),color="blue") +   geom_point(data=IgABP,aes(x=IgAm10299,y=IgAp10299),color="orange",size=2) + theme_gray()
+
+p6 <- ggplot(iga.seq.data,aes(x=IgAm10279,y=IgAp10279)) + geom_point(color="gray") + scale_x_log10(limits=c(1e-6,1)) + scale_y_log10(limits=c(1e-6,1)) +  geom_point(data=IgA279HI,aes(x=IgAm10279,y=IgAp10279),color="red") + geom_point(data=IgA279LO,aes(x=IgAm10279,y=IgAp10279),color="blue") +   geom_point(data=IgABP,aes(x=IgAm10279,y=IgAp10279),color="orange",size=2) + theme_gray()
+
+(p1 | p2 | p3) / (p4 | p5 | p6)
+
+# plot time series of Akkermansia and B. plebeius together
+ak.p1 <- ggplot(subset(ts.df,X2=="10287"|X2=="10277"),aes(x=X4,y=X6)) + geom_point(aes(color=X2)) + scale_y_log10(limits=c(1e-4,1)) + scale_x_log10(limits=c(1e-4,1)) + theme_gray() + theme(legend.position="none")
+
+
+```
+
+
+
